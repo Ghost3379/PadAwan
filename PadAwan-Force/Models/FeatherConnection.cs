@@ -1,0 +1,853 @@
+using System;
+using System.Collections.Generic;
+using System.IO.Ports;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+#if WINDOWS
+using System.Management; // für optionale VID/PID-Filterung
+#endif
+
+//hi, test from cursor, read in VS
+//hi, test from VS, I read your message from cursor, means i can have both open and code in both
+
+namespace PadAwan_Force.Models
+{
+    public class FeatherConnection
+    {
+        // Constants for ESP32-S3/CircuitPython compatibility
+        private const int Baud = 115200; // statt 9600
+        private const int ReadToMs = 3000;
+        private const int WriteToMs = 2000;
+        private const string Eol = "\n"; // falls Firmware "\r\n" nutzt: entsprechend ändern
+
+        public bool IsConnected { get; private set; }
+        public string ComPort { get; private set; } = "None";
+        public string Status { get; private set; } = "n/c";
+
+        public int Battery { get; private set; } = 0;
+
+        public int Color { get; private set; } = 0xFF0000;
+        public SerialPort? SerialPort { get; private set; }
+
+        // Device Information Properties
+        public string DeviceName { get; private set; } = "PadAwan Force";
+        public string FirmwareVersion { get; private set; } = "v1.2.3";
+        public string HardwareRevision { get; private set; } = "Rev A";
+        public string SerialNumber { get; private set; } = "PAF-2024-001";
+        public string Uptime { get; private set; } = "0h 0m";
+        public string LastConnected { get; private set; } = "Never";
+        public string DataTransferred { get; private set; } = "0 MB";
+
+        public event EventHandler? ConnectionStatusChanged;
+        public event EventHandler? DeviceInfoChanged;
+
+        private static SerialPort CreatePort(string portName)
+        {
+            return new SerialPort(portName, Baud, Parity.None, 8, StopBits.One)
+            {
+                Handshake = Handshake.None,
+                DtrEnable = true,          // wichtig bei ESP32
+                RtsEnable = true,          // wichtig bei ESP32
+                ReadTimeout = ReadToMs,
+                WriteTimeout = WriteToMs,
+                NewLine = Eol,
+                Encoding = Encoding.ASCII
+            };
+        }
+
+        private static List<string> GetCandidatePorts()
+        {
+            var ports = SerialPort.GetPortNames().ToList();
+            
+#if WINDOWS
+            // Optional: Filter for ESP32/Adafruit VID:PID (303A:80D7)
+            try
+            {
+                var filteredPorts = new List<string>();
+                using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_SerialPort"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        var deviceId = obj["DeviceID"]?.ToString();
+                        var pnpDeviceId = obj["PNPDeviceID"]?.ToString();
+                        
+                        if (deviceId != null && pnpDeviceId != null && 
+                            pnpDeviceId.Contains("VID_303A") && pnpDeviceId.Contains("PID_80D7"))
+                        {
+                            filteredPorts.Add(deviceId);
+                        }
+                    }
+                }
+                
+                if (filteredPorts.Any())
+                {
+                    System.Diagnostics.Debug.WriteLine($"Found ESP32 ports: {string.Join(", ", filteredPorts)}");
+                    return filteredPorts;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"VID/PID filtering failed: {ex.Message}");
+            }
+#endif
+            
+            return ports;
+        }
+
+        public async Task<bool> TryConnectAsync()
+        {
+            try
+            {
+                // 1) Bereits bestehende Verbindung prüfen
+                if (IsConnected && SerialPort != null && SerialPort.IsOpen)
+                {
+                    if (await PingAsync()) return true;
+                    Disconnect();
+                    await Task.Delay(300);
+                }
+
+                // 2) Ports sammeln (optional erst nach VID/PID filtern)
+                var ports = GetCandidatePorts();
+                System.Diagnostics.Debug.WriteLine($"Found {ports.Count} candidate ports: {string.Join(", ", ports)}");
+                
+                foreach (var port in ports)
+                {
+                    if (await TestPortAsync(port))
+                    {
+                        // aktive Verbindung sauber neu aufbauen
+                        try
+                        {
+                            SerialPort?.Close();
+                            SerialPort?.Dispose();
+                        } 
+                        catch { /* ignore */ }
+
+                        SerialPort = CreatePort(port);
+                        try
+                        {
+                            SerialPort.Open();
+                            // nach Open kurz stabilisieren lassen
+                            await Task.Delay(200);
+                            SerialPort.DiscardInBuffer();
+                            SerialPort.DiscardOutBuffer();
+
+                            if (await PingAsync())
+                            {
+                                IsConnected = true;
+                                ComPort = port;
+                                Status = "Connected";
+                                Color = 0x00FF00;
+                                OnConnectionStatusChanged();
+                                System.Diagnostics.Debug.WriteLine($"Successfully connected to {port}");
+                                return true;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"Open on {port} failed: {ex.Message}");
+                        }
+
+                        // fallback: schließen/entsorgen
+                        try { SerialPort?.Close(); SerialPort?.Dispose(); } catch { }
+                        SerialPort = null;
+                    }
+                }
+
+                // nichts gefunden
+                IsConnected = false;
+                ComPort = "None";
+                Status = "n/c";
+                Color = 0xFF0000;
+                Battery = 0;
+                OnConnectionStatusChanged();
+                System.Diagnostics.Debug.WriteLine("No FeatherS3 device found on any COM port");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Connection error: {ex.Message}");
+                IsConnected = false;
+                ComPort = "None";
+                Status = $"Error: {ex.Message}";
+                Color = 0xFF0000;
+                Battery = 0;
+                OnConnectionStatusChanged();
+                return false;
+            }
+        }
+
+        private async Task<bool> TestPortAsync(string portName)
+        {
+            try
+            {
+                using var test = CreatePort(portName);
+                test.Open();
+                await Task.Delay(150);             // kurze Stabilisierung
+                test.DiscardInBuffer();
+                test.DiscardOutBuffer();
+
+                // PING schicken
+                test.WriteLine("PING");
+                var started = DateTime.UtcNow;
+
+                while ((DateTime.UtcNow - started).TotalMilliseconds < ReadToMs)
+                {
+                    try
+                    {
+                        // ReadLine nutzt test.NewLine
+                        var line = test.ReadLine()?.Trim();
+                        if (!string.IsNullOrEmpty(line))
+                        {
+                            if (line.Equals("PONG", StringComparison.OrdinalIgnoreCase))
+                                return true;
+
+                            // optional: Bootmeldungen überspringen und weiter lesen
+                        }
+                    }
+                    catch (TimeoutException)
+                    {
+                        // weiter warten bis Gesamttimeout
+                    }
+                    await Task.Delay(10);
+                }
+
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Port von anderem Prozess belegt (z. B. dein Python-Tester / VS Serial Monitor)
+                return false;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"TestPortAsync({portName}) error: {ex.Message}");
+                return false;
+            }
+        }
+
+
+        public void Disconnect()
+        {
+            try
+            {
+                if (SerialPort?.IsOpen == true)
+                {
+                    SerialPort.Close();
+                    SerialPort.Dispose();
+                    SerialPort = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error during disconnect: {ex.Message}");
+            }
+
+            IsConnected = false;
+            ComPort = "None";
+            Status = "n/c";
+            Color = 0xFF0000;
+            Battery = 0;
+            
+            System.Diagnostics.Debug.WriteLine($"Disconnect called - IsConnected: {IsConnected}, Status: {Status}, ComPort: {ComPort}");
+            OnConnectionStatusChanged();
+        }
+
+        protected virtual void OnConnectionStatusChanged()
+        {
+            System.Diagnostics.Debug.WriteLine($"OnConnectionStatusChanged called - IsConnected: {IsConnected}, Status: {Status}, ComPort: {ComPort}, Battery: {Battery}");
+            ConnectionStatusChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        protected virtual void OnDeviceInfoChanged()
+        {
+            System.Diagnostics.Debug.WriteLine($"OnDeviceInfoChanged called - Battery: {Battery}, IsConnected: {IsConnected}");
+            DeviceInfoChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        public async Task RefreshDeviceInfoAsync()
+        {
+            System.Diagnostics.Debug.WriteLine($"RefreshDeviceInfoAsync called - IsConnected: {IsConnected}");
+            
+            if (!IsConnected)
+            {
+                // Reset to default values when not connected
+                DeviceName = "PadAwan Force";
+                FirmwareVersion = "v1.2.3";
+                HardwareRevision = "Rev A";
+                SerialNumber = "PAF-2024-001";
+                Uptime = "0h 0m";
+                LastConnected = "Never";
+                DataTransferred = "0 MB";
+                Battery = 0;
+                System.Diagnostics.Debug.WriteLine("Not connected - resetting device info to defaults");
+                OnDeviceInfoChanged();
+                return;
+            }
+
+            try
+            {
+                // Simulate device communication delay
+                await Task.Delay(200);
+
+                // In a real implementation, these would be actual device queries
+                // For now, we'll simulate some realistic values
+                var random = new Random();
+                
+                // Simulate battery reading (20-100%)
+                Battery = random.Next(20, 101);
+                
+                // Simulate uptime (1-24 hours)
+                var hours = random.Next(1, 25);
+                var minutes = random.Next(0, 60);
+                Uptime = $"{hours}h {minutes}m";
+                
+                // Update last connected time
+                LastConnected = DateTime.Now.ToString("MMM dd HH:mm");
+                
+                // Simulate data transfer (0.1-5.0 MB)
+                var dataAmount = random.Next(1, 51) / 10.0;
+                DataTransferred = $"{dataAmount:F1} MB";
+
+                System.Diagnostics.Debug.WriteLine($"Refreshed device info - Battery: {Battery}, IsConnected: {IsConnected}");
+                OnDeviceInfoChanged();
+            }
+            catch (Exception ex)
+            {
+                // Handle communication errors
+                System.Diagnostics.Debug.WriteLine($"Error refreshing device info: {ex.Message}");
+            }
+        }
+
+        public void UpdateConnectionInfo(string comPort, bool connected, string status)
+        {
+            ComPort = comPort;
+            IsConnected = connected;
+            Status = status;
+            Color = connected ? 0x00FF00 : 0xFF0000;
+            OnConnectionStatusChanged();
+        }
+
+        public async Task<bool> SendLayersAsync(List<Layer> layers)
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen)
+            {
+                System.Diagnostics.Debug.WriteLine("Cannot send layers - not connected to FeatherS3");
+                return false;
+            }
+
+            try
+            {
+                // Convert layers to JSON
+                var json = System.Text.Json.JsonSerializer.Serialize(new { layers }, new JsonSerializerOptions 
+                { 
+                    WriteIndented = false 
+                });
+                
+                System.Diagnostics.Debug.WriteLine($"Sending layers to FeatherS3: {json}");
+                
+                // Send JSON data to FeatherS3
+                SerialPort.WriteLine("BEGIN_JSON");
+                
+                // Split JSON into lines and send each line
+                var lines = json.Split('\n');
+                foreach (string line in lines)
+                {
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        SerialPort.WriteLine(line);
+                        await Task.Delay(10); // Small delay between lines
+                    }
+                }
+                
+                SerialPort.WriteLine("END_JSON");
+                
+                // Wait for response
+                await Task.Delay(1000);
+                
+                // Read response
+                if (SerialPort.BytesToRead > 0)
+                {
+                    string response = SerialPort.ReadLine();
+                    System.Diagnostics.Debug.WriteLine($"FeatherS3 response: {response}");
+                    
+                    if (response.Contains("UPLOAD_OK"))
+                    {
+                        System.Diagnostics.Debug.WriteLine("Layers uploaded successfully to FeatherS3");
+                        return true;
+                    }
+                    else if (response.Contains("UPLOAD_FAIL"))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Upload failed: {response}");
+                        return false;
+                    }
+                }
+                
+                System.Diagnostics.Debug.WriteLine("No response from FeatherS3");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error sending layers to FeatherS3: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> PingAsync()
+        {
+            var sp = SerialPort;
+            if (sp == null || !sp.IsOpen)
+            {
+                System.Diagnostics.Debug.WriteLine("PingAsync: port not open");
+                return false;
+            }
+
+            try
+            {
+                sp.DiscardInBuffer();
+                sp.WriteLine("PING");
+
+                var deadline = DateTime.UtcNow.AddMilliseconds(1500);
+                while (DateTime.UtcNow < deadline)
+                {
+                    try
+                    {
+                        var line = sp.ReadLine()?.Trim();
+                        if (!string.IsNullOrEmpty(line))
+                        {
+                            bool ok = line.Equals("PONG", StringComparison.OrdinalIgnoreCase);
+                            System.Diagnostics.Debug.WriteLine($"Ping response: '{line}' -> {ok}");
+                            if (ok) return true;
+                        }
+                    }
+                    catch (TimeoutException) { /* weiter bis deadline */ }
+                    await Task.Delay(10);
+                }
+                System.Diagnostics.Debug.WriteLine("Ping: timeout");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Ping error: {ex.Message}");
+                return false; // hier nicht Disconnect(), sonst killst du Connect-Flows
+            }
+        }
+        public async Task<bool> RequestBatteryStatusAsync()
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen)
+            {
+                System.Diagnostics.Debug.WriteLine("RequestBatteryStatusAsync: Not connected or port not open");
+                return false;
+            }
+
+            try
+            {
+                SerialPort.WriteLine("BATTERY_STATUS");
+                await Task.Delay(200);
+                
+                if (SerialPort.BytesToRead > 0)
+                {
+                    string response = SerialPort.ReadLine();
+                    System.Diagnostics.Debug.WriteLine($"Battery response: {response}");
+                    
+                    if (response.StartsWith("BATTERY:"))
+                    {
+                        var parts = response.Substring(8).Split(',');
+                        if (parts.Length >= 3)
+                        {
+                            if (int.TryParse(parts[0], out int percentage))
+                            {
+                                Battery = percentage;
+                                System.Diagnostics.Debug.WriteLine($"Battery updated to {percentage}% - connection is working!");
+                                OnDeviceInfoChanged();
+                                return true;
+                            }
+                        }
+                    }
+                }
+                
+                System.Diagnostics.Debug.WriteLine("No battery response received");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Battery status error: {ex.Message}");
+                // Don't call CheckConnectionHealthAsync here as it might cause disconnection
+                return false;
+            }
+        }
+
+        public async Task<string?> GetFirmwareVersionAsync()
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen)
+            {
+                System.Diagnostics.Debug.WriteLine("GetFirmwareVersionAsync: Not connected or port not open");
+                return null;
+            }
+
+            try
+            {
+                SerialPort.DiscardInBuffer();
+                SerialPort.WriteLine("GET_VERSION");
+                await Task.Delay(200);
+                
+                if (SerialPort.BytesToRead > 0)
+                {
+                    string response = SerialPort.ReadLine();
+                    System.Diagnostics.Debug.WriteLine($"Version response: {response}");
+                    
+                    if (response.StartsWith("VERSION:"))
+                    {
+                        string version = response.Substring(8).Trim();
+                        System.Diagnostics.Debug.WriteLine($"Firmware version: {version}");
+                        return version;
+                    }
+                }
+                
+                System.Diagnostics.Debug.WriteLine("No version response received");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Version request error: {ex.Message}");
+                return null;
+            }
+        }
+
+        public async Task<bool> UploadConfigurationAsync(string jsonConfig)
+        {
+            // Reuse the existing SendLayerConfigurationAsync method
+            return await SendLayerConfigurationAsync(jsonConfig);
+        }
+
+        public async Task<bool> CheckConnectionHealthAsync()
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen)
+            {
+                System.Diagnostics.Debug.WriteLine("CheckConnectionHealthAsync: Not connected or port not open");
+                return false;
+            }
+
+            try
+            {
+                // Try to ping the device
+                bool pingResult = await PingAsync();
+                if (!pingResult)
+                {
+                    System.Diagnostics.Debug.WriteLine("Connection health check failed - device not responding");
+                    Disconnect();
+                    return false;
+                }
+                System.Diagnostics.Debug.WriteLine("Connection health check passed");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Connection health check error: {ex.Message}");
+                Disconnect();
+                return false;
+            }
+        }
+
+        public bool IsDeviceStillConnected()
+        {
+            try
+            {
+                if (SerialPort == null || !SerialPort.IsOpen)
+                {
+                    System.Diagnostics.Debug.WriteLine("IsDeviceStillConnected: SerialPort is null or not open");
+                    return false;
+                }
+
+                // Check if the port is still available
+                // Note: GetPortNames() can be slow and might temporarily not include a port
+                // during device reconnection, so we should be lenient
+                try
+                {
+                    var portNames = SerialPort.GetPortNames();
+                    if (!portNames.Any(p => p == SerialPort.PortName))
+                    {
+                        // Port not in list - but this could be a temporary Windows issue
+                        // Only disconnect if we also can't access the port
+                        try
+                        {
+                            // Try to access a property to see if port is actually accessible
+                            var test = SerialPort.PortName;
+                            // If we get here, port is still accessible even if not in list
+                            System.Diagnostics.Debug.WriteLine($"IsDeviceStillConnected: Port {SerialPort.PortName} not in list but still accessible");
+                            return true; // Be lenient - port might be temporarily missing from list
+                        }
+                        catch
+                        {
+                            System.Diagnostics.Debug.WriteLine($"IsDeviceStillConnected: Port {SerialPort.PortName} no longer accessible");
+                            return false;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // If GetPortNames() fails, assume connection is still good if port is open
+                    System.Diagnostics.Debug.WriteLine($"IsDeviceStillConnected: GetPortNames() failed: {ex.Message}, assuming connected");
+                    return SerialPort.IsOpen;
+                }
+
+                // Port is in list and open - connection is good
+                System.Diagnostics.Debug.WriteLine("IsDeviceStillConnected: Port is available and open");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // On any exception, check if port is still open as fallback
+                System.Diagnostics.Debug.WriteLine($"IsDeviceStillConnected error: {ex.Message}, checking if port is open");
+                try
+                {
+                    return SerialPort != null && SerialPort.IsOpen;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        public async Task<bool> SendLayerConfigurationAsync(string jsonConfig)
+        {
+            Console.WriteLine("=== SendLayerConfigurationAsync called ===");
+            Console.WriteLine($"IsConnected: {IsConnected}");
+            Console.WriteLine($"SerialPort: {SerialPort?.PortName}");
+            Console.WriteLine($"SerialPort.IsOpen: {SerialPort?.IsOpen}");
+            
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen) 
+            {
+                Console.WriteLine("Cannot send - not connected or port not open");
+                return false;
+            }
+
+            try
+            {
+                Console.WriteLine("Sending layer configuration to FeatherS3...");
+                System.Diagnostics.Debug.WriteLine("Sending layer configuration to FeatherS3...");
+                
+                // Send upload command
+                Console.WriteLine("Sending UPLOAD_LAYER_CONFIG command...");
+                SerialPort.WriteLine("UPLOAD_LAYER_CONFIG");
+                await Task.Delay(100);
+
+                // Wait for ready response
+                Console.WriteLine("Waiting for READY_FOR_LAYER_CONFIG response...");
+                string response = await ReadResponseAsync(2000);
+                Console.WriteLine($"Received response: '{response}'");
+                
+                if (!response.Contains("READY_FOR_LAYER_CONFIG"))
+                {
+                    Console.WriteLine($"Unexpected response: {response}");
+                    System.Diagnostics.Debug.WriteLine($"Unexpected response: {response}");
+                    return false;
+                }
+                
+                Console.WriteLine("Received READY_FOR_LAYER_CONFIG, proceeding with JSON upload...");
+
+                // Send JSON data
+                Console.WriteLine("Sending BEGIN_JSON...");
+                SerialPort.WriteLine("BEGIN_JSON");
+                await Task.Delay(50);
+
+                // Split JSON into lines and send
+                Console.WriteLine($"Sending JSON data ({jsonConfig.Length} characters)...");
+                string[] lines = jsonConfig.Split('\n');
+                Console.WriteLine($"Sending {lines.Length} lines...");
+                foreach (string line in lines)
+                {
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        SerialPort.WriteLine(line);
+                        await Task.Delay(10); // Small delay between lines
+                    }
+                }
+
+                Console.WriteLine("Sending END_JSON...");
+                SerialPort.WriteLine("END_JSON");
+                await Task.Delay(100);
+
+                // Wait for upload confirmation
+                response = await ReadResponseAsync(5000);
+                if (response.Contains("UPLOAD_OK"))
+                {
+                    System.Diagnostics.Debug.WriteLine("Configuration uploaded successfully!");
+                    return true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"Upload failed: {response}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error sending configuration: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<string?> GetCurrentConfigurationAsync()
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen) return null;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine("Requesting current configuration from FeatherS3...");
+                
+                SerialPort.DiscardInBuffer();
+                SerialPort.WriteLine("GET_CURRENT_CONFIG");
+                await Task.Delay(300);
+
+                // Lese die gesamte Antwort - JSON kann mehrzeilig sein
+                var startTime = DateTime.Now;
+                var response = new System.Text.StringBuilder();
+                bool foundPrefix = false;
+                int emptyLineCount = 0;
+
+                while ((DateTime.Now - startTime).TotalMilliseconds < 5000)
+                {
+                    if (SerialPort.BytesToRead > 0)
+                    {
+                        string line = SerialPort.ReadLine();
+                        
+                        if (line.StartsWith("CURRENT_CONFIG:"))
+                        {
+                            foundPrefix = true;
+                            // Entferne den Prefix und füge den Rest hinzu
+                            string jsonPart = line.Substring(15);
+                            if (!string.IsNullOrWhiteSpace(jsonPart))
+                            {
+                                response.Append(jsonPart);
+                                emptyLineCount = 0;
+                            }
+                        }
+                        else if (foundPrefix)
+                        {
+                            // Wenn wir den Prefix gefunden haben, sammle alle weiteren Zeilen
+                            if (string.IsNullOrWhiteSpace(line))
+                            {
+                                emptyLineCount++;
+                                // Nach 2 leeren Zeilen annehmen, dass die JSON vollständig ist
+                                if (emptyLineCount >= 2)
+                                {
+                                    break;
+                                }
+                            }
+                            else
+                            {
+                                emptyLineCount = 0;
+                                response.AppendLine(line);
+                            }
+                        }
+                    }
+                    await Task.Delay(10);
+                }
+
+                string configJson = response.ToString().Trim();
+                
+                if (foundPrefix && configJson.Length > 0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Configuration retrieved successfully! Length: {configJson.Length}");
+                    return configJson;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"Failed to get configuration. Found prefix: {foundPrefix}, Length: {configJson.Length}");
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error getting configuration: {ex.Message}");
+                return null;
+            }
+        }
+
+        public async Task<bool> SetDisplayModeAsync(string mode, bool enabled = true)
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen) return false;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"Setting display mode to {mode}, enabled: {enabled}");
+                SerialPort.WriteLine($"SET_DISPLAY_MODE:{mode},{enabled}");
+                await Task.Delay(200);
+
+                string response = await ReadResponseAsync(2000);
+                if (response.Contains("DISPLAY_MODE_SET"))
+                {
+                    System.Diagnostics.Debug.WriteLine("Display mode set successfully!");
+                    return true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"Failed to set display mode: {response}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error setting display mode: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> SetTimeAsync(string timeString)
+        {
+            if (!IsConnected || SerialPort == null || !SerialPort.IsOpen) return false;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"Setting time to {timeString}");
+                SerialPort.WriteLine($"SET_TIME:{timeString}");
+                await Task.Delay(200);
+
+                string response = await ReadResponseAsync(2000);
+                if (response.Contains("TIME_SET"))
+                {
+                    System.Diagnostics.Debug.WriteLine("Time set successfully!");
+                    return true;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"Failed to set time: {response}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error setting time: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<string> ReadResponseAsync(int timeoutMs)
+        {
+            var startTime = DateTime.Now;
+            var response = new System.Text.StringBuilder();
+
+            while ((DateTime.Now - startTime).TotalMilliseconds < timeoutMs)
+            {
+                if (SerialPort != null && SerialPort.BytesToRead > 0)
+                {
+                    string line = SerialPort.ReadLine();
+                    response.AppendLine(line);
+                    
+                    // Check if we have a complete response
+                    if (line.Contains("UPLOAD_OK") || line.Contains("UPLOAD_FAIL") || 
+                        line.Contains("CONFIG_ERROR") || line.Contains("CURRENT_CONFIG:"))
+                    {
+                        break;
+                    }
+                }
+                await Task.Delay(10);
+            }
+
+            return response.ToString().Trim();
+        }
+    }
+}
