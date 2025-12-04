@@ -1225,16 +1225,6 @@ namespace PadAwan_Force.ViewModels
 
             try
             {
-                var dialog = new Avalonia.Controls.OpenFileDialog
-                {
-                    Title = "Select Configuration File",
-                    Filters = new List<Avalonia.Controls.FileDialogFilter>
-                    {
-                        new Avalonia.Controls.FileDialogFilter { Name = "JSON Files", Extensions = { "json" } },
-                        new Avalonia.Controls.FileDialogFilter { Name = "All Files", Extensions = { "*" } }
-                    }
-                };
-
                 var mainWindow = Avalonia.Application.Current?.ApplicationLifetime is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
                     ? desktop.MainWindow
                     : null;
@@ -1245,11 +1235,25 @@ namespace PadAwan_Force.ViewModels
                     return;
                 }
 
-                var result = await dialog.ShowAsync(mainWindow);
-                
-                if (result != null && result.Length > 0)
+                var files = await mainWindow.StorageProvider.OpenFilePickerAsync(new Avalonia.Platform.Storage.FilePickerOpenOptions
                 {
-                    string filePath = result[0];
+                    Title = "Select Configuration File",
+                    FileTypeFilter = new[]
+                    {
+                        new Avalonia.Platform.Storage.FilePickerFileType("JSON Files")
+                        {
+                            Patterns = new[] { "*.json" }
+                        },
+                        new Avalonia.Platform.Storage.FilePickerFileType("All Files")
+                        {
+                            Patterns = new[] { "*" }
+                        }
+                    }
+                });
+                
+                if (files != null && files.Count > 0)
+                {
+                    string filePath = files[0].Path.LocalPath;
                     string configJson = await File.ReadAllTextAsync(filePath);
                     
                     DisplayText = "Uploading configuration from file...";
@@ -1660,28 +1664,36 @@ namespace PadAwan_Force.ViewModels
                         else
                         {
                             // Try to reconnect if not connected (non-blocking)
-                            _ = Task.Run(async () =>
+                            // But skip if firmware update is in progress
+                            if (!_featherConnection.IsUpdatingFirmware)
                             {
-                                try
+                                _ = Task.Run(async () =>
                                 {
-                                    System.Diagnostics.Debug.WriteLine("Attempting to reconnect...");
-                                    bool reconnected = await _featherConnection.TryConnectAsync();
-                                    if (reconnected)
+                                    try
                                     {
-                                        System.Diagnostics.Debug.WriteLine("Reconnection successful");
+                                        System.Diagnostics.Debug.WriteLine("Attempting to reconnect...");
+                                        bool reconnected = await _featherConnection.TryConnectAsync();
+                                        if (reconnected)
+                                        {
+                                            System.Diagnostics.Debug.WriteLine("Reconnection successful");
+                                        }
+                                        else
+                                        {
+                                            System.Diagnostics.Debug.WriteLine("Reconnection failed");
+                                        }
+                                        ForceSyncAllWindows(); // Update UI immediately after connection attempt
                                     }
-                                    else
+                                    catch (Exception ex)
                                     {
-                                        System.Diagnostics.Debug.WriteLine("Reconnection failed");
+                                        System.Diagnostics.Debug.WriteLine($"Error in reconnection: {ex.Message}");
+                                        Console.WriteLine($"Error in reconnection: {ex.Message}");
                                     }
-                                    ForceSyncAllWindows(); // Update UI immediately after connection attempt
-                                }
-                                catch (Exception ex)
-                                {
-                                    System.Diagnostics.Debug.WriteLine($"Error in reconnection: {ex.Message}");
-                                    Console.WriteLine($"Error in reconnection: {ex.Message}");
-                                }
-                            });
+                                });
+                            }
+                            else
+                            {
+                                System.Diagnostics.Debug.WriteLine("Skipping reconnection - firmware update in progress");
+                            }
                         }
                     }
                     catch (Exception ex)

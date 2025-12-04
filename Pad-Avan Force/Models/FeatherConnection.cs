@@ -30,6 +30,9 @@ namespace PadAwan_Force.Models
 
         public int Color { get; private set; } = 0xFF0000;
         public SerialPort? SerialPort { get; private set; }
+        
+        // Flag to prevent reconnection during firmware update
+        public bool IsUpdatingFirmware { get; set; } = false;
 
         // Device Information Properties
         public string DeviceName { get; private set; } = "PadAwan Force";
@@ -98,6 +101,13 @@ namespace PadAwan_Force.Models
 
         public async Task<bool> TryConnectAsync()
         {
+            // Don't try to connect if firmware update is in progress
+            if (IsUpdatingFirmware)
+            {
+                System.Diagnostics.Debug.WriteLine("Skipping connection attempt - firmware update in progress");
+                return false;
+            }
+            
             try
             {
                 // 1) Bereits bestehende Verbindung prüfen
@@ -490,22 +500,39 @@ namespace PadAwan_Force.Models
             {
                 SerialPort.DiscardInBuffer();
                 SerialPort.WriteLine("GET_VERSION");
-                await Task.Delay(200);
+                await Task.Delay(500); // Give device more time to respond
                 
-                if (SerialPort.BytesToRead > 0)
+                // Wait for response with timeout - read multiple lines if needed
+                int attempts = 0;
+                string fullResponse = "";
+                while (attempts < 20) // Wait up to 1 second
                 {
-                    string response = SerialPort.ReadLine();
-                    System.Diagnostics.Debug.WriteLine($"Version response: {response}");
+                    await Task.Delay(50);
+                    attempts++;
                     
-                    if (response.StartsWith("VERSION:"))
+                    if (SerialPort.BytesToRead > 0)
                     {
-                        string version = response.Substring(8).Trim();
-                        System.Diagnostics.Debug.WriteLine($"Firmware version: {version}");
-                        return version;
+                        // Read all available data
+                        while (SerialPort.BytesToRead > 0)
+                        {
+                            string line = SerialPort.ReadLine();
+                            fullResponse += line + "\n";
+                            System.Diagnostics.Debug.WriteLine($"Version response line: {line}");
+                        }
+                        
+                        // Check if we got the version
+                        if (fullResponse.Contains("VERSION:"))
+                        {
+                            int versionIndex = fullResponse.IndexOf("VERSION:");
+                            string versionLine = fullResponse.Substring(versionIndex);
+                            string version = versionLine.Substring(8).Split('\n', '\r')[0].Trim();
+                            System.Diagnostics.Debug.WriteLine($"Firmware version extracted: {version}");
+                            return version;
+                        }
                     }
                 }
                 
-                System.Diagnostics.Debug.WriteLine("No version response received");
+                System.Diagnostics.Debug.WriteLine($"No version response received. Full response: {fullResponse}");
                 return null;
             }
             catch (Exception ex)

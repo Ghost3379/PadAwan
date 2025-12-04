@@ -1,6 +1,6 @@
 /*
  * PadAwan-Force Macro Pad - Arduino Version
- * ESP32-S3 FeatherS3 Implementation
+ * ESP32-S3 FeatherS3D Implementation
  * 
  * Features:
  * - USB HID Keyboard & Consumer Control
@@ -24,6 +24,7 @@
 #include <RotaryEncoder.h>
 #include <string.h>  // For memset
 #include "KeyboardLayoutWinCH.h"
+#include <UMS3.h>
 
 // ===== DEBUG SETTINGS =====
 // Set to 1 to enable Serial debug output (visible in Serial Monitor)
@@ -60,12 +61,6 @@
 // SD Card: CS->IO38
 #define SD_CS_PIN 38
 
-// Battery: MAX17048 I2C chip (Feather S3D)
-// VBUS sense pin (GPIO9)
-#define VBUS_SENSE_PIN 9
-// MAX17048 I2C address
-#define MAX17048_ADDRESS 0x36
-
 // Display: I2C, Address 0x3C
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 32
@@ -78,6 +73,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 RotaryEncoder rotaryA(ROTARY_A_PIN_A, ROTARY_A_PIN_B, RotaryEncoder::LatchMode::FOUR3);
 RotaryEncoder rotaryB(ROTARY_B_PIN_A, ROTARY_B_PIN_B, RotaryEncoder::LatchMode::FOUR3);
 KeyboardLayoutWinCH keyboardLayout(&Keyboard);
+UMS3 ums3;
 
 // ===== CONFIGURATION =====
 String configFilePath = "/macropad_config.json";
@@ -100,8 +96,6 @@ int rotaryAPosition = 0;
 int rotaryBPosition = 0;
 int rotaryALastPosition = 0;
 int rotaryBLastPosition = 0;
-bool max17048Available = false;
-bool max17048Available = false;
 
 // Button states (for debouncing)
 bool buttonStates[6] = {false, false, false, false, false, false};
@@ -160,6 +154,13 @@ void setup() {
     display.display();
   }
   
+  // Initialize I2C for display and other peripherals
+  Wire.begin();
+  
+  // Initialize UMS3 board peripherals (call this after Wire.begin())
+  ums3.begin();
+  DEBUG_PRINTLN("PADAWAN: UMS3 initialized");
+  
   // Initialize SD card
   SPI.begin();
   if (!SD.begin(SD_CS_PIN)) {
@@ -181,17 +182,6 @@ void setup() {
   // Initialize rotary encoder button pins
   pinMode(ROTARY_A_BUTTON_PIN, INPUT_PULLUP);
   pinMode(ROTARY_B_BUTTON_PIN, INPUT_PULLUP);
-  
-  // Initialize VBUS sense pin
-  pinMode(VBUS_SENSE_PIN, INPUT);
-  
-  // Initialize MAX17048 battery gauge
-  max17048Available = initMAX17048();
-  if (max17048Available) {
-    DEBUG_PRINTLN("PADAWAN: MAX17048 initialized");
-  } else {
-    DEBUG_PRINTLN("PADAWAN: MAX17048 initialization failed");
-  }
   
   // Load configuration
   if (sdAvailable) {
@@ -525,102 +515,35 @@ void downloadConfig(bool useCurrentConfigPrefix) {
   file.close();
 }
 
-// ===== BATTERY STATUS (MAX17048 for Feather S3D) =====
-
-bool initMAX17048() {
-  // Check if MAX17048 is present on I2C bus
-  Wire.beginTransmission(MAX17048_ADDRESS);
-  byte error = Wire.endTransmission();
-  if (error == 0) {
-    // Initialize MAX17048 - send reset command
-    // Write to Command Register (0xFE) with POR (Power-On Reset) command
-    Wire.beginTransmission(MAX17048_ADDRESS);
-    Wire.write(0xFE);  // Command register
-    Wire.write(0x54);  // POR command
-    Wire.endTransmission();
-    delay(10);
-    return true;
-  }
-  return false;
-}
-
-float getBatteryVoltage() {
-  if (!max17048Available) return 0.0;
-  
-  // Read VCELL register (0x02) - 16-bit value
-  Wire.beginTransmission(MAX17048_ADDRESS);
-  Wire.write(0x02);  // VCELL register
-  Wire.endTransmission(false);
-  
-  Wire.requestFrom(MAX17048_ADDRESS, 2);
-  if (Wire.available() >= 2) {
-    uint16_t vcell = (Wire.read() << 8) | Wire.read();
-    // VCELL is in units of 78.125µV (0.000078125V)
-    // Convert to volts
-    float voltage = (float)vcell * 0.000078125;
-    return voltage;
-  }
-  return 0.0;
-}
-
-float getBatteryPercentage() {
-  if (!max17048Available) return 0.0;
-  
-  // Read SOC register (0x04) - 16-bit value
-  Wire.beginTransmission(MAX17048_ADDRESS);
-  Wire.write(0x04);  // SOC register
-  Wire.endTransmission(false);
-  
-  Wire.requestFrom(MAX17048_ADDRESS, 2);
-  if (Wire.available() >= 2) {
-    uint16_t soc = (Wire.read() << 8) | Wire.read();
-    // SOC is in units of 1/256% (0.00390625%)
-    // High byte is percentage, low byte is fraction
-    float percentage = (float)soc / 256.0;
-    return percentage;
-  }
-  return 0.0;
-}
-
-bool getVBUSPresent() {
-  // VBUS_SENSE pin is HIGH when USB power is present
-  return digitalRead(VBUS_SENSE_PIN) == HIGH;
-}
-
+// ===== BATTERY STATUS =====
 String getBatteryStatus() {
-  if (!max17048Available) {
-    // Fallback if MAX17048 is not available
-    return "BATTERY:0,0.00,unknown";
-  }
+  // Get battery voltage from MAX17048
+  float batteryVoltage = ums3.getBatteryVoltage();
   
-  float voltage = getBatteryVoltage();
-  float percentage = getBatteryPercentage();
-  bool vbusPresent = getVBUSPresent();
+  // Calculate battery percentage from voltage
+  // LiPo typical range: 3.0V (empty) to 4.2V (full)
+  // Formula: percentage = ((voltage - 3.0) / (4.2 - 3.0)) * 100
+  float batteryPercentage = ((batteryVoltage - 3.0) / 1.2) * 100.0;
   
-  // Clamp percentage to valid range
-  if (percentage < 0) percentage = 0;
-  if (percentage > 100) percentage = 100;
+  // Clamp to valid range (0-100)
+  if (batteryPercentage < 0) batteryPercentage = 0;
+  if (batteryPercentage > 100) batteryPercentage = 100;
+  
+  // Check if USB power is present
+  bool vbusPresent = ums3.getVbusPresent();
   
   // Determine status
-  String status = "unknown";
-  if (vbusPresent) {
-    status = "charging";
-  } else if (percentage >= 80) {
-    status = "good";
-  } else if (percentage >= 50) {
-    status = "ok";
-  } else if (percentage >= 20) {
-    status = "low";
-  } else {
-    status = "critical";
-  }
+  String status = vbusPresent ? "charging" : "discharging";
   
   // Format: BATTERY:percentage,voltage,status
-  // Voltage in format like "4.20" (2 decimal places)
-  char voltageStr[10];
-  dtostrf(voltage, 4, 2, voltageStr);
+  String response = "BATTERY:";
+  response += String((int)batteryPercentage);
+  response += ",";
+  response += String(batteryVoltage, 2);
+  response += ",";
+  response += status;
   
-  return "BATTERY:" + String((int)percentage) + "," + String(voltageStr) + "," + status;
+  return response;
 }
 
 // ===== BUTTON HANDLING =====
@@ -1334,12 +1257,20 @@ void updateDisplayMode() {
   if (displayMode == "layer") {
     updateDisplay("Layer: " + String(currentLayer));
   } else if (displayMode == "battery") {
-    // Get battery percentage from MAX17048
-    float percentage = getBatteryPercentage();
-    int batteryPercent = (int)percentage;
-    if (batteryPercent < 0) batteryPercent = 0;
-    if (batteryPercent > 100) batteryPercent = 100;
-    updateDisplay(String(batteryPercent) + "%");
+    float batteryVoltage = ums3.getBatteryVoltage();
+    
+    // Calculate battery percentage from voltage
+    float batteryPercentage = ((batteryVoltage - 3.0) / 1.2) * 100.0;
+    if (batteryPercentage < 0) batteryPercentage = 0;
+    if (batteryPercentage > 100) batteryPercentage = 100;
+    
+    bool vbusPresent = ums3.getVbusPresent();
+    
+    String batteryText = String((int)batteryPercentage) + "%";
+    if (vbusPresent) {
+      batteryText += " CHG";
+    }
+    updateDisplay(batteryText);
   } else if (displayMode == "time") {
     if (systemTime.length() > 0) {
       updateDisplay(systemTime);

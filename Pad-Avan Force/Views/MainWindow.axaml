@@ -7,7 +7,7 @@
         x:Class="PadAwan_Force.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
-        Title="PadAwan Force - Makropad Control"
+        Title="Pad-Avan Force - Makropad Control"
         Background="Black"
         Width="1000" Height="700"
         CanResize="False"
@@ -53,7 +53,7 @@
     
     <!-- Application Title -->
     <TextBlock Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
-               Text="PadAwan Force" 
+               Text="Pad-Avan Force" 
                FontSize="32" 
                FontWeight="Bold" 
                Foreground="#00FFFF"
@@ -226,7 +226,7 @@
                         VerticalContentAlignment="Center"/>
 
 				<Button Content="Config"
-						Width="120"
+						Width="90"
 						Height="30"
 						FontSize="12"
 						Background="#404040"
