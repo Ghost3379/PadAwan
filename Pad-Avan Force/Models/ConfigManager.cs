@@ -14,7 +14,20 @@ namespace PadAwan_Force.Models
 
         public ConfigManager()
         {
-            _configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ConfigFileName);
+            // Use AppData folder instead of installation directory (which is read-only when installed)
+            // This allows the app to save config files even when installed to Program Files
+            var appDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Pad-Avan Force"
+            );
+            
+            // Ensure the directory exists
+            if (!Directory.Exists(appDataFolder))
+            {
+                Directory.CreateDirectory(appDataFolder);
+            }
+            
+            _configPath = Path.Combine(appDataFolder, ConfigFileName);
         }
 
         public async Task<List<Layer>> LoadLayersAsync()

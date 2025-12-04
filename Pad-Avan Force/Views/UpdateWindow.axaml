@@ -7,7 +7,7 @@
         Width="550" Height="600"
         CanResize="False"
         Background="Black"
-        Icon="/Assets/avalonia-logo.ico"
+        Icon="/Assets/Pad-Avan Force logo.ico"
         WindowStartupLocation="CenterOwner">
   
   <Grid Margin="30">

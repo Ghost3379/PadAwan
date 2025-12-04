@@ -6,7 +6,7 @@
         mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="700"
         x:Class="PadAwan_Force.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
-        Icon="/Assets/avalonia-logo.ico"
+        Icon="/Assets/Pad-Avan Force logo.ico"
         Title="Pad-Avan Force - Makropad Control"
         Background="Black"
         Width="1000" Height="700"

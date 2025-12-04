@@ -878,10 +878,20 @@ namespace PadAwan_Force.ViewModels
 
         public async Task SaveLayersAsync()
         {
-            await _configManager.SaveLayersAsync(Layers.ToList(), DisplayMode, DisplayEnabled, SelectedLayerIndex + 1);
-            
-            // Configuration is saved locally - user can send to device manually with "Send to Device" button
-            Console.WriteLine("Configuration saved locally - use 'Send to Device' button to transfer to FeatherS3");
+            try
+            {
+                await _configManager.SaveLayersAsync(Layers.ToList(), DisplayMode, DisplayEnabled, SelectedLayerIndex + 1);
+                
+                // Configuration is saved locally - user can send to device manually with "Send to Device" button
+                Console.WriteLine("Configuration saved locally - use 'Send to Device' button to transfer to FeatherS3");
+                DisplayText = "✅ Configuration saved";
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving configuration: {ex.Message}");
+                DisplayText = $"❌ Error saving config: {ex.Message}";
+                System.Diagnostics.Debug.WriteLine($"Error saving configuration: {ex.Message}\n{ex.StackTrace}");
+            }
         }
 
         partial void OnDisplayOnChanged(bool value)
@@ -1718,24 +1728,35 @@ namespace PadAwan_Force.ViewModels
                             {
                                 _refreshCounter = 0;
                                 
-                                // Check connection health
+                                // Check connection health (but only if we're past the grace period)
+                                // The grace period check is done inside IsDeviceStillConnected()
                                 if (!_featherConnection.IsDeviceStillConnected())
                                 {
                                     // Wait a bit and check again - Windows might temporarily remove port from list
-                                    await Task.Delay(500);
+                                    await Task.Delay(1000); // Increased delay for more stability
                                     if (!_featherConnection.IsDeviceStillConnected())
                                     {
                                         // Double-check with a ping before disconnecting
-                                        bool pingResult = await _featherConnection.PingAsync();
-                                        if (!pingResult)
+                                        // Only disconnect if ping fails twice in a row
+                                        bool pingResult1 = await _featherConnection.PingAsync();
+                                        if (!pingResult1)
                                         {
-                                            System.Diagnostics.Debug.WriteLine("Device disconnected - ping failed, updating UI");
-                                            _featherConnection.Disconnect();
-                                            ForceSyncAllWindows(); // Update UI immediately
+                                            await Task.Delay(500);
+                                            bool pingResult2 = await _featherConnection.PingAsync();
+                                            if (!pingResult2)
+                                            {
+                                                System.Diagnostics.Debug.WriteLine("Device disconnected - ping failed twice, updating UI");
+                                                _featherConnection.Disconnect();
+                                                ForceSyncAllWindows(); // Update UI immediately
+                                            }
+                                            else
+                                            {
+                                                System.Diagnostics.Debug.WriteLine("Device still connected - second ping succeeded");
+                                            }
                                         }
                                         else
                                         {
-                                            System.Diagnostics.Debug.WriteLine("Device still connected - ping succeeded despite port check failure");
+                                            System.Diagnostics.Debug.WriteLine("Device still connected - first ping succeeded");
                                         }
                                     }
                                     else

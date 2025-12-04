@@ -33,6 +33,14 @@ namespace PadAwan_Force.Models
         
         // Flag to prevent reconnection during firmware update
         public bool IsUpdatingFirmware { get; set; } = false;
+        
+        // Track when connection was established to allow grace period for Windows port registration
+        private DateTime? _connectionEstablishedTime = null;
+        private const int ConnectionGracePeriodSeconds = 10; // Don't check connection health for 10 seconds after connection
+        
+        // Lock to prevent multiple simultaneous connection attempts
+        private readonly object _connectionLock = new object();
+        private bool _isConnecting = false;
 
         // Device Information Properties
         public string DeviceName { get; private set; } = "PadAwan Force";
@@ -108,12 +116,27 @@ namespace PadAwan_Force.Models
                 return false;
             }
             
+            // Prevent multiple simultaneous connection attempts
+            lock (_connectionLock)
+            {
+                if (_isConnecting)
+                {
+                    System.Diagnostics.Debug.WriteLine("TryConnectAsync: Already connecting, skipping duplicate attempt");
+                    return IsConnected; // Return current connection state
+                }
+                _isConnecting = true;
+            }
+            
             try
             {
                 // 1) Bereits bestehende Verbindung prüfen
                 if (IsConnected && SerialPort != null && SerialPort.IsOpen)
                 {
-                    if (await PingAsync()) return true;
+                    if (await PingAsync())
+                    {
+                        _isConnecting = false;
+                        return true;
+                    }
                     Disconnect();
                     await Task.Delay(300);
                 }
@@ -149,8 +172,10 @@ namespace PadAwan_Force.Models
                                 ComPort = port;
                                 Status = "Connected";
                                 Color = 0x00FF00;
+                                _connectionEstablishedTime = DateTime.Now; // Track when connection was established
                                 OnConnectionStatusChanged();
                                 System.Diagnostics.Debug.WriteLine($"Successfully connected to {port}");
+                                _isConnecting = false;
                                 return true;
                             }
                         }
@@ -165,25 +190,39 @@ namespace PadAwan_Force.Models
                     }
                 }
 
-                // nichts gefunden
-                IsConnected = false;
-                ComPort = "None";
-                Status = "n/c";
-                Color = 0xFF0000;
-                Battery = 0;
-                OnConnectionStatusChanged();
-                System.Diagnostics.Debug.WriteLine("No FeatherS3 device found on any COM port");
+                // nichts gefunden - but don't change status if we're already connected
+                // This prevents overwriting a successful connection with "n/c" due to race conditions
+                if (!IsConnected)
+                {
+                    IsConnected = false;
+                    ComPort = "None";
+                    Status = "n/c";
+                    Color = 0xFF0000;
+                    Battery = 0;
+                    OnConnectionStatusChanged();
+                    System.Diagnostics.Debug.WriteLine("No FeatherS3 device found on any COM port");
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("TryConnectAsync: No new device found, but already connected - keeping existing connection");
+                }
+                _isConnecting = false;
                 return false;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Connection error: {ex.Message}");
-                IsConnected = false;
-                ComPort = "None";
-                Status = $"Error: {ex.Message}";
-                Color = 0xFF0000;
-                Battery = 0;
-                OnConnectionStatusChanged();
+                _isConnecting = false;
+                // Don't change status if we're already connected - this prevents overwriting a good connection
+                if (!IsConnected)
+                {
+                    IsConnected = false;
+                    ComPort = "None";
+                    Status = $"Error: {ex.Message}";
+                    Color = 0xFF0000;
+                    Battery = 0;
+                    OnConnectionStatusChanged();
+                }
                 return false;
             }
         }
@@ -259,6 +298,7 @@ namespace PadAwan_Force.Models
             Status = "n/c";
             Color = 0xFF0000;
             Battery = 0;
+            _connectionEstablishedTime = null; // Reset connection time
             
             System.Diagnostics.Debug.WriteLine($"Disconnect called - IsConnected: {IsConnected}, Status: {Status}, ComPort: {ComPort}");
             OnConnectionStatusChanged();
@@ -294,6 +334,17 @@ namespace PadAwan_Force.Models
                 System.Diagnostics.Debug.WriteLine("Not connected - resetting device info to defaults");
                 OnDeviceInfoChanged();
                 return;
+            }
+            
+            // Don't refresh device info too soon after connection - give it time to stabilize
+            if (_connectionEstablishedTime.HasValue)
+            {
+                var timeSinceConnection = DateTime.Now - _connectionEstablishedTime.Value;
+                if (timeSinceConnection.TotalSeconds < 3) // Wait 3 seconds before refreshing device info
+                {
+                    System.Diagnostics.Debug.WriteLine($"RefreshDeviceInfoAsync: Too soon after connection ({timeSinceConnection.TotalSeconds:F1}s), skipping");
+                    return;
+                }
             }
 
             try
@@ -585,6 +636,18 @@ namespace PadAwan_Force.Models
                 {
                     System.Diagnostics.Debug.WriteLine("IsDeviceStillConnected: SerialPort is null or not open");
                     return false;
+                }
+                
+                // Grace period: Don't check connection health immediately after connection
+                // Windows needs time to fully register the port in GetPortNames()
+                if (_connectionEstablishedTime.HasValue)
+                {
+                    var timeSinceConnection = DateTime.Now - _connectionEstablishedTime.Value;
+                    if (timeSinceConnection.TotalSeconds < ConnectionGracePeriodSeconds)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"IsDeviceStillConnected: In grace period ({timeSinceConnection.TotalSeconds:F1}s), assuming connected");
+                        return true; // Assume connected during grace period
+                    }
                 }
 
                 // Check if the port is still available
