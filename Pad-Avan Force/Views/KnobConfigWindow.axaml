@@ -200,7 +200,7 @@
             <ComboBox x:Name="PressSpecialKeyComboBox" Width="160" Height="30" FontSize="12"
                       Background="#404040" Foreground="White" BorderBrush="#707070" 
                       BorderThickness="2" CornerRadius="5" SelectedIndex="0">
-              <ComboBoxItem Content="Escape"/>
+              <ComboBoxItem Content="Esc"/>
               <ComboBoxItem Content="Enter"/>
               <ComboBoxItem Content="Tab"/>
               <ComboBoxItem Content="Space"/>
@@ -232,6 +232,13 @@
               <ComboBoxItem Content="Shift"/>
               <ComboBoxItem Content="Alt"/>
               <ComboBoxItem Content="Alt Gr"/>
+              <ComboBoxItem Content="Play/Pause"/>
+              <ComboBoxItem Content="Next Track"/>
+              <ComboBoxItem Content="Previous Track"/>
+              <ComboBoxItem Content="Stop"/>
+              <ComboBoxItem Content="Volume Up"/>
+              <ComboBoxItem Content="Volume Down"/>
+              <ComboBoxItem Content="Mute"/>
             </ComboBox>
           </StackPanel>
           
@@ -281,7 +288,7 @@
                     <ComboBoxItem Content="Space"/>
                     <ComboBoxItem Content="Enter"/>
                     <ComboBoxItem Content="Tab"/>
-                    <ComboBoxItem Content="Escape"/>
+                    <ComboBoxItem Content="Esc"/>
                     <ComboBoxItem Content="Backspace"/>
                     <ComboBoxItem Content="Delete"/>
                     <ComboBoxItem Content="Home"/>

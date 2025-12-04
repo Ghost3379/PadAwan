@@ -1183,18 +1183,54 @@ namespace PadAwan_Force.ViewModels
                 
                 if (configJson != null)
                 {
-                    // Speichere die Konfiguration in eine Datei
-                    string downloadPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "downloaded_config.json");
-                    await File.WriteAllTextAsync(downloadPath, configJson);
-                    
-                    Console.WriteLine("=== Configuration downloaded successfully ===");
-                    Console.WriteLine($"Saved to: {downloadPath}");
-                    Console.WriteLine("=== Configuration Content ===");
-                    Console.WriteLine(configJson);
-                    Console.WriteLine("=== End Configuration ===");
-                    
-                    DisplayText = $"✅ Config downloaded! Saved to: downloaded_config.json";
-                    System.Diagnostics.Debug.WriteLine($"Configuration downloaded and saved to: {downloadPath}");
+                    // Open file save dialog to let user choose where to save
+                    var mainWindow = Avalonia.Application.Current?.ApplicationLifetime is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+                        ? desktop.MainWindow
+                        : null;
+
+                    if (mainWindow == null)
+                    {
+                        DisplayText = "❌ Cannot open file dialog - main window not found";
+                        return;
+                    }
+
+                    var file = await mainWindow.StorageProvider.SaveFilePickerAsync(new Avalonia.Platform.Storage.FilePickerSaveOptions
+                    {
+                        Title = "Save Configuration File",
+                        SuggestedFileName = "macropad_config.json",
+                        FileTypeChoices = new[]
+                        {
+                            new Avalonia.Platform.Storage.FilePickerFileType("JSON Files")
+                            {
+                                Patterns = new[] { "*.json" }
+                            },
+                            new Avalonia.Platform.Storage.FilePickerFileType("All Files")
+                            {
+                                Patterns = new[] { "*" }
+                            }
+                        }
+                    });
+
+                    if (file != null)
+                    {
+                        string filePath = file.Path.LocalPath;
+                        await File.WriteAllTextAsync(filePath, configJson);
+                        
+                        Console.WriteLine("=== Configuration downloaded successfully ===");
+                        Console.WriteLine($"Saved to: {filePath}");
+                        Console.WriteLine("=== Configuration Content ===");
+                        Console.WriteLine(configJson);
+                        Console.WriteLine("=== End Configuration ===");
+                        
+                        DisplayText = $"✅ Config downloaded! Saved to: {Path.GetFileName(filePath)}";
+                        System.Diagnostics.Debug.WriteLine($"Configuration downloaded and saved to: {filePath}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("File save dialog was cancelled");
+                        DisplayText = "Download cancelled";
+                        System.Diagnostics.Debug.WriteLine("File save dialog was cancelled by user");
+                    }
                 }
                 else
                 {
@@ -1303,12 +1339,73 @@ namespace PadAwan_Force.ViewModels
                 if (configJson != null)
                 {
                     Console.WriteLine("=== Configuration read successfully ===");
-                    Console.WriteLine("=== Configuration Content ===");
-                    Console.WriteLine(configJson);
-                    Console.WriteLine("=== End Configuration ===");
-                    
-                    DisplayText = $"✅ Config read! Check console for details.";
+                    Console.WriteLine($"Configuration retrieved successfully! Length: {configJson.Length}");
                     System.Diagnostics.Debug.WriteLine("Configuration read successfully");
+                    
+                    // Parse the configuration JSON
+                    try
+                    {
+                        var config = System.Text.Json.JsonSerializer.Deserialize<ConfigData>(configJson, new System.Text.Json.JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true
+                        });
+                        
+                        if (config != null && config.Layers != null && config.Layers.Count > 0)
+                        {
+                            // Update Layers collection
+                            Layers.Clear();
+                            foreach (var layer in config.Layers)
+                            {
+                                Layers.Add(layer);
+                            }
+                            
+                            // Update display settings
+                            if (config.Display != null)
+                            {
+                                DisplayMode = config.Display.Mode ?? "layer";
+                                DisplayEnabled = config.Display.Enabled;
+                            }
+                            
+                            // Set current layer (if specified in config)
+                            if (config.CurrentLayer > 0 && config.CurrentLayer <= Layers.Count)
+                            {
+                                SelectedLayerIndex = config.CurrentLayer - 1; // Convert to 0-based index
+                            }
+                            else
+                            {
+                                SelectedLayerIndex = 0; // Default to Layer 1
+                            }
+                            
+                            // Force property change notifications
+                            OnPropertyChanged(nameof(Layers));
+                            OnPropertyChanged(nameof(SelectedLayerIndex));
+                            OnPropertyChanged(nameof(CurrentLayer));
+                            
+                            // Update button and knob texts
+                            UpdateButtonTexts();
+                            UpdateKnobTexts();
+                            
+                            // Also save to local file for consistency
+                            var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "macropad_config.json");
+                            await File.WriteAllTextAsync(configPath, configJson);
+                            
+                            Console.WriteLine($"✅ Configuration loaded: {config.Layers.Count} layer(s), Current Layer: {config.CurrentLayer}");
+                            DisplayText = $"✅ Config loaded! {config.Layers.Count} layer(s) loaded.";
+                            System.Diagnostics.Debug.WriteLine($"Configuration loaded successfully: {config.Layers.Count} layers");
+                        }
+                        else
+                        {
+                            Console.WriteLine("⚠️ Configuration parsed but no layers found");
+                            DisplayText = "⚠️ Config read but no layers found";
+                        }
+                    }
+                    catch (Exception parseEx)
+                    {
+                        Console.WriteLine($"Error parsing configuration JSON: {parseEx.Message}");
+                        Console.WriteLine($"JSON content: {configJson.Substring(0, Math.Min(500, configJson.Length))}...");
+                        DisplayText = $"❌ Error parsing config: {parseEx.Message}";
+                        System.Diagnostics.Debug.WriteLine($"Error parsing configuration: {parseEx.Message}");
+                    }
                 }
                 else
                 {

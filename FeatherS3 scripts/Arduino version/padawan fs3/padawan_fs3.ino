@@ -684,6 +684,17 @@ void executeButtonAction(String action, String keyValue) {
     }
   } else if (action == "Special Key") {
     if (keyValue.length() > 0) {
+      // Check if it's a media control key (Consumer Control)
+      uint16_t consumerCode = getConsumerCode(keyValue);
+      if (consumerCode != 0) {
+        // It's a media/volume control - use ConsumerControl
+        DEBUG_PRINTLN("Button pressing media control: " + keyValue + " (code: 0x" + String(consumerCode, HEX) + ")");
+        ConsumerControl.press(consumerCode);
+        ConsumerControl.release();
+        return;
+      }
+      
+      // Not a media control, try as regular keycode
       uint8_t keycode = getKeycode(keyValue);
       if (keycode != 0) {
         DEBUG_PRINTLN("Button pressing special key: " + keyValue + " (code: 0x" + String(keycode, HEX) + ")");
@@ -1017,6 +1028,17 @@ void executeKnobAction(String action, String keyValue) {
     }
   } else if (action == "Special Key") {
     if (keyValue.length() > 0) {
+      // Check if it's a media control key (Consumer Control)
+      uint16_t consumerCode = getConsumerCode(keyValue);
+      if (consumerCode != 0) {
+        // It's a media/volume control - use ConsumerControl
+        DEBUG_PRINTLN("Knob pressing media control: " + keyValue + " (code: 0x" + String(consumerCode, HEX) + ")");
+        ConsumerControl.press(consumerCode);
+        ConsumerControl.release();
+        return;
+      }
+      
+      // Not a media control, try as regular keycode
       uint8_t keycode = getKeycode(keyValue);
       if (keycode != 0) {
         DEBUG_PRINTLN("Knob pressing special key: " + keyValue + " (code: 0x" + String(keycode, HEX) + ")");
