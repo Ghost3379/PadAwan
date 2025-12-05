@@ -70,6 +70,8 @@ artifacts/
 *.hex
 *.elf
 *.bin
+# Allow .bin files in releases folder for firmware distribution
+!releases/**/*.bin
 *.eep
 *.lss
 *.sym
